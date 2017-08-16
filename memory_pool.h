@@ -148,14 +148,14 @@ template <typename T, std::size_t block_size>
 template <class U, class... Args>
 inline void
 MemoryPool<T, block_size>::construct(U* p, Args&&... args) {
-    new (p) U (std::forward<Args>(args)...);
+    if (p != nullptr) new (p) U (std::forward<Args>(args)...);
 }
 
 template <typename T, std::size_t block_size>
 template <class U>
 inline void
 MemoryPool<T, block_size>::destroy(U* p) {
-    p->~U();
+    if (p != nullptr) p->~U();
 }
 
 template <typename T, std::size_t block_size>
@@ -202,9 +202,8 @@ MemoryPool<T, block_size>::allocate_block() {
         m_last_slot->next = reinterpret_cast<slot_t *>(start);
 
     // We'll never get exactly the number of objects requested, but it should be close.
-    for (size_t i = 0; (start + sizeof(slot_t)) < end; i++) {
+    for (; (start + sizeof(slot_t)) < end; start += sizeof(slot_t)) {
         reinterpret_cast<slot_t *>(start)->next = reinterpret_cast<slot_t *>(start + sizeof(slot_t));
-        start += sizeof(slot_t);
         m_max_size++;
     }
 
