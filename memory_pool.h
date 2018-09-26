@@ -6,6 +6,9 @@
 #include <atomic>
 #include <type_traits>
 #include <utility>
+#include <chrono>
+#include <iostream>
+#include <thread>
 
 template <class T> class spin_lock {
     T &lock_obj;
@@ -37,8 +40,13 @@ class MemoryPool
     // Constructor / destructor
     MemoryPool() noexcept;
     ~MemoryPool() noexcept;
+    MemoryPool(MemoryPool&& memoryPool) noexcept;
+
+    // Move assignment
+    MemoryPool& operator=(MemoryPool&& memoryPool);
 
     std::size_t max_size() const noexcept { return m_max_size * sizeof(slot_t); }
+    std::size_t max_number_objects() const noexcept { return m_max_size; }
 
     // Public member functions
     pointer address(reference x) const noexcept { return &x; };
@@ -48,6 +56,8 @@ class MemoryPool
     pointer allocate(std::size_t n = 1, const_pointer hint = 0);
     void deallocate(pointer p, size_type n = 1);
 
+    // This prevents blocks from being allocated more quickly than "threshold" seconds
+    void set_allocate_block_threshold(uint32_t thresh) { m_allocate_block_threshold = thresh; }
 
     template <class U, class... Args> void construct(U* p, Args&&... args);
     template <class U>  void destroy(U* p);
@@ -75,21 +85,21 @@ class MemoryPool
     };
 
     // Private variables
+    uint32_t m_allocate_block_threshold = 0;
     uint64_t m_max_size = 0;
     slot_t *m_last_slot = nullptr;
     allocated_block_t *m_allocated_block_head = nullptr;
     std::atomic<slot_head_t> m_free;
     std::atomic_flag m_lock = ATOMIC_FLAG_INIT;
+    std::chrono::system_clock::time_point m_last_allocate_block_time { std::chrono::system_clock::now() };
 
     // Private functions
     size_type pad_pointer(char *p, std::size_t align) const noexcept;
 
-    void allocate_block();
+    bool allocate_block();
 
     MemoryPool(const MemoryPool& memoryPool) noexcept = delete;
-    MemoryPool(MemoryPool&& memoryPool) noexcept = delete;
-    MemoryPool& operator=(const MemoryPool& memoryPool) {};
-    MemoryPool& operator=(MemoryPool&& memoryPool) {};
+    MemoryPool& operator=(const MemoryPool& memoryPool) = delete;
 };
 
 template <typename T, std::size_t block_size>
@@ -108,18 +118,48 @@ MemoryPool<T, block_size>::~MemoryPool() noexcept {
     allocated_block_t *next = nullptr;
     while (curr != nullptr) {
         next = curr->next;
-        operator delete(curr);
+        delete curr;
         curr = next;
     }
 }
+
+template <typename T, std::size_t block_size>
+MemoryPool<T, block_size>::MemoryPool(MemoryPool &&mp) noexcept :
+    m_max_size(mp.m_max_size), m_last_slot(nullptr), m_free(mp.m_free),
+    m_lock(mp.m_lock), m_allocated_block_head(nullptr) {
+
+    std::swap(m_last_slot, mp.m_last_slot);
+    std::swap(m_allocated_block_head, mp.m_allocated_block_head);
+}
+
+template <typename T, std::size_t block_size>
+MemoryPool<T, block_size> &
+MemoryPool<T, block_size>::operator=(MemoryPool&& mp) {
+    if (this == &mp)
+        return *this;
+
+    m_last_slot = mp.m_last_slot;
+    mp.m_last_slot = nullptr;
+
+    m_allocated_block_head = mp.m_allocated_block_head;
+    mp.m_allocated_block_head = nullptr;
+
+    m_max_size = mp.m_max_size;
+    mp.m_max_size = 0;
+
+    std::swap(m_free, mp.m_free);
+    std::swap(m_lock, mp.m_lock);
+
+    return *this;
+};
 
 template <typename T, std::size_t block_size>
 inline typename MemoryPool<T, block_size>::pointer
 MemoryPool<T, block_size>::allocate(size_type n, const_pointer hint) {
     slot_head_t next, orig = m_free.load();
     do {
-        if (orig.node == nullptr) {
-            allocate_block();
+        while (orig.node == nullptr) {
+            if (!allocate_block()) return nullptr;
             orig = m_free.load();
         }
         next.aba = orig.aba + 1;
@@ -163,6 +203,7 @@ template <class... Args>
 inline typename MemoryPool<T, block_size>::pointer
 MemoryPool<T, block_size>::new_element(Args&&... args) {
     pointer result = allocate();
+    if (!result) return nullptr;
     construct<value_type>(result, std::forward<Args>(args)...);
     return result;
 }
@@ -177,13 +218,21 @@ MemoryPool<T, block_size>::delete_element(pointer p) {
 }
 
 template <typename T, std::size_t block_size>
-inline void
+inline bool
 MemoryPool<T, block_size>::allocate_block() {
     spin_lock<std::atomic_flag> lock(m_lock);
     // After coming out of the lock, if the condition that got us here is now false, we can safely return
     // and do nothing.  This means another thread beat us to the allocation.  If we don't do this, we could
     // potentially allocate an entire block_size of memory that would never get used.
-    if (m_free.load().node != nullptr) { return; }
+    if (m_free.load().node != nullptr) { return true; }
+
+    std::chrono::system_clock::time_point now { std::chrono::system_clock::now() };
+    if (m_max_size > 0 &&
+       (now <= m_last_allocate_block_time + std::chrono::seconds(m_allocate_block_threshold))) {
+        return false;
+    }
+
+    m_last_allocate_block_time = std::chrono::system_clock::now();
 
     allocated_block_t *new_block = new allocated_block_t();
     new_block->next = m_allocated_block_head;
@@ -210,12 +259,16 @@ MemoryPool<T, block_size>::allocate_block() {
     // "start" should now point to one byte past the end of the last slot.  Subtract the size of slot_t from it to
     // get a pointer to the beginning of the last slot.
     m_last_slot = reinterpret_cast<slot_t *>(start - sizeof(slot_t));
-    m_last_slot->next = nullptr;
+
+    // If there's anything in the free list, make sure it doesn't get lost when we reset m_free
+    m_last_slot->next = m_free.load().node; // Either nullptr or ptr to head of free list
 
     // Update the head of the free list to point to the start of the new block
     slot_head_t first;
     first.aba = 0;
     first.node = reinterpret_cast<slot_t *>(body + body_padding);
     m_free.store(first);
+
+    return true;
 }
 #endif
