@@ -67,7 +67,7 @@ allocate(int8_t threads, int32_t limit) {
                 for (int16_t i = 0; i < limit; i++) {
                     nodes[i] = pool.new_element();
                     
-                    std::string pkt_data = random_string(65535);
+                    auto pkt_data = random_string(65535);
                     std::memcpy(nodes[i]->data, pkt_data.c_str(), pkt_data.length());
                     
                     auto new_foo = ++nodes[i]->foo;

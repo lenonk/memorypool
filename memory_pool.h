@@ -9,6 +9,7 @@
 #include <chrono>
 #include <iostream>
 #include <thread>
+#include <cassert>
 
 template <class T> class spin_lock {
     T &lock_obj;
@@ -70,6 +71,9 @@ class MemoryPool
     struct slot_t {
         T element;
         slot_t *next = nullptr;
+#ifdef _MEM_POOL_DEBUG_
+        bool allocated = false;
+#endif
     };
 
     struct slot_head_t {
@@ -148,7 +152,6 @@ MemoryPool<T, block_size>::operator=(MemoryPool&& mp) {
     mp.m_max_size = 0;
 
     std::swap(m_free, mp.m_free);
-    std::swap(m_lock, mp.m_lock);
 
     return *this;
 };
@@ -167,6 +170,10 @@ MemoryPool<T, block_size>::allocate(size_type n, const_pointer hint) {
     }
     while (!atomic_compare_exchange_weak(&m_free, &orig, next));
 
+#ifdef _MEM_POOL_DEBUG_
+    assert(orig.node->allocated == false);
+    orig.node->allocated = true;
+#endif
     return reinterpret_cast<pointer>(orig.node);
 }
 
@@ -176,6 +183,10 @@ MemoryPool<T, block_size>::deallocate(pointer p, size_type n)
 {
     slot_head_t next, orig = m_free.load();
     slot_t *tp = reinterpret_cast<slot_t *>(p);
+#ifdef _MEM_POOL_DEBUG_
+    assert(tp->allocated == true);
+    tp->allocated = false;
+#endif
     do {
         tp->next = orig.node;
         next.aba = orig.aba + 1;
@@ -232,6 +243,11 @@ MemoryPool<T, block_size>::allocate_block() {
         return false;
     }
 
+#ifdef _MEM_POOL_DEBUG_
+    fprintf(stdout, "Allocating new block of %lu nodes\n", block_size);
+    fflush(stdout);
+#endif
+
     m_last_allocate_block_time = std::chrono::system_clock::now();
 
     allocated_block_t *new_block = new allocated_block_t();
@@ -259,9 +275,11 @@ MemoryPool<T, block_size>::allocate_block() {
     // "start" should now point to one byte past the end of the last slot.  Subtract the size of slot_t from it to
     // get a pointer to the beginning of the last slot.
     m_last_slot = reinterpret_cast<slot_t *>(start - sizeof(slot_t));
+    m_last_slot->next = nullptr;
 
     // If there's anything in the free list, make sure it doesn't get lost when we reset m_free
-    m_last_slot->next = m_free.load().node; // Either nullptr or ptr to head of free list
+    if (m_free.load().node != nullptr)
+        m_last_slot->next = m_free.load().node;
 
     // Update the head of the free list to point to the start of the new block
     slot_head_t first;
@@ -269,6 +287,11 @@ MemoryPool<T, block_size>::allocate_block() {
     first.node = reinterpret_cast<slot_t *>(body + body_padding);
     m_free.store(first);
 
+#ifdef _MEM_POOL_DEBUG_
+    fprintf(stdout, "Done allocating new block of %lu nodes\n", block_size);
+    fflush(stdout);
+#endif
+    
     return true;
 }
 #endif
