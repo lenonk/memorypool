@@ -11,10 +11,10 @@ So, in conclusion, if you want a fast memory pool, and aren't interested in thre
 Just include the header in your project.
 
 Syntax should look something like this:
-
+```
 MemoryPool<YourObject, 1000> pool; // Where 1000 is the number of objects you want to pre-allocate
 
 YourObject *yo = pool.new_element( [args] ); // Where args are passed to the constructor of YourObject
 pool.delete_element(yo); // Returns the element to the pool, and calls the destructor
-
+```
 You can also use the allocate() and deallocate() members directly if you're not interested in calling constructors and destructors.
