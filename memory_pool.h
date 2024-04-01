@@ -156,6 +156,9 @@ MemoryPool<T, block_size>::operator=(MemoryPool&& mp) {
     return *this;
 };
 
+// There is opportunity here for the ABA problem to rear it's ugly head.
+// See here: https://en.wikipedia.org/wiki/ABA_problem
+// The solution below works adequately.
 template <typename T, std::size_t block_size>
 inline typename MemoryPool<T, block_size>::pointer
 MemoryPool<T, block_size>::allocate(size_type n, const_pointer hint) {
