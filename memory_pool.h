@@ -11,6 +11,7 @@
 #include <thread>
 #include <cassert>
 
+// Simulate a kernel level spin lock.
 template <class T> class spin_lock {
     T &lock_obj;
 public:
